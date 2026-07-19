@@ -1,0 +1,77 @@
+name: Generer les vignettes
+
+# Se declenche quand des images changent dans contenu/ sur la branche img.
+on:
+  push:
+    branches: [img]
+    paths:
+      - 'contenu/**.jpg'
+      - 'contenu/**.jpeg'
+      - 'contenu/**.png'
+      - 'contenu/**.webp'
+      - '!contenu/thumb/**'      # on ignore le dossier des vignettes...
+
+# ...mais le filtre "paths" ci-dessus ne suffit pas a couper la boucle :
+# concurrency + le garde "[skip-thumbs]" plus bas s'en chargent vraiment.
+
+# Autorise l'Action a ecrire dans le depot (sinon elle ne peut rien pousser).
+permissions:
+  contents: write
+
+# Empeche deux executions simultanees de se marcher dessus.
+concurrency:
+  group: thumbs-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  thumbs:
+    runs-on: ubuntu-latest
+
+    # Garde anti-boucle : si le commit vient de l'Action elle-meme
+    # (message contenant [skip-thumbs]), on ne relance pas.
+    if: ${{ !contains(github.event.head_commit.message, '[skip-thumbs]') }}
+
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+        with:
+          ref: img
+          fetch-depth: 2          # besoin du commit precedent pour le diff
+
+      - name: Installer Python et Pillow
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pillow
+
+      - name: Lister les images changees
+        id: changed
+        run: |
+          # Images ajoutees/modifiees dans ce push, hors dossier thumb/.
+          FILES=$(git diff --name-only --diff-filter=AM HEAD~1 HEAD \
+            | grep -E '^contenu/[^/]+\.(jpg|jpeg|png|webp)$' || true)
+          echo "Fichiers detectes :"
+          echo "$FILES"
+          # On passe la liste a l'etape suivante via un fichier (gere les espaces).
+          echo "$FILES" > /tmp/changed.txt
+
+      - name: Generer les vignettes
+        run: |
+          if [ -s /tmp/changed.txt ]; then
+            # xargs -d '\n' : un fichier par ligne, gere les espaces dans les noms.
+            xargs -d '\n' python make_thumbs_ci.py < /tmp/changed.txt
+          else
+            echo "Aucune image de contenu a traiter."
+          fi
+
+      - name: Commiter les vignettes generees
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add contenu/thumb
+          if git diff --cached --quiet; then
+            echo "Aucune vignette a commiter."
+          else
+            git commit -m "Vignettes automatiques [skip-thumbs]"
+            git push
+          fi
